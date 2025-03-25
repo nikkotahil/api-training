@@ -1,11 +1,14 @@
+from django.core.serializers import serialize
 from rest_framework import generics, permissions, status
+from rest_framework.generics import CreateAPIView
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import Question, Choice, Vote
 from django.contrib.auth import authenticate
 from .serializers import (
-    QuestionSerializer, RegisterSerializer
+    QuestionSerializer, RegisterSerializer, VoteSerializer, UserVotedQuestionSerializer
 )
 from django.contrib.auth import get_user_model
 
@@ -60,51 +63,42 @@ class RegisterView(generics.CreateAPIView):
         return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class CreateQuestionView(APIView):
+class CreateQuestionView(CreateAPIView):
     permission_classes = [IsAdminUser]
+    serializer_class = QuestionSerializer
 
-    def post(self, request):
-        question_text = request.data.get('question_text')
-        choices = request.data.get('choices', [])
-
-        if not question_text or not choices:
-            return Response({"error": "Question and choices are required"}, status=400)
-
-        question = Question.objects.create(question_text=question_text)
-        for choice_text in choices:
-            Choice.objects.create(question=question, choice_text=choice_text)
-
+    def perform_create(self, serializer):
+        serializer.save()
         return Response({"message": "Question created successfully"}, status=201)
 
 
+class QuestionListView(generics.ListAPIView):
+    queryset = Question.objects.all()
+    serializer_class = QuestionSerializer
+    permission_classes = [AllowAny]
+
+class QuestionDetailView(generics.RetrieveAPIView):
+    queryset = Question.objects.all()
+    serializer_class = QuestionSerializer
+    permission_classes = [AllowAny]
+
+
 class VoteView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        user = request.user
-        question_id = request.data.get('question_id')
-        choice_id = request.data.get('choice_id')
+        serializer = VoteSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"message": "Vote cast successfully"}, status=201)
 
-        try:
-            question = Question.objects.get(id=question_id)
-            choice = Choice.objects.get(id=choice_id, question=question)
-        except (Question.DoesNotExist, Choice.DoesNotExist):
-            return Response({"error": "Invalid question or choice"}, status=400)
-
-        if Vote.objects.filter(user=user, question=question).exists():
-            return Response({"error": "You have already voted on this question"}, status=400)
-
-        Vote.objects.create(user=user, question=question, choice=choice)
-        choice.votes += 1
-        choice.save()
-
-        return Response({"message": "Vote cast successfully"}, status=201)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class UserVotedQuestionsView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class UserVotedQuestionsView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserVotedQuestionSerializer
 
-    def get(self, request):
-        voted_questions = Question.objects.filter(vote__user=request.user).distinct()
-        serializer = QuestionSerializer(voted_questions, many=True)
-        return Response(serializer.data)
+    def get_queryset(self):
+        votes = Vote.objects.filter(user=self.request.user).values_list('question', flat=True)
+        return Question.objects.filter(id__in=votes)

@@ -41,7 +41,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             username=validated_data["username"],
             first_name=validated_data["first_name"],
             last_name=validated_data["last_name"],
-            password=make_password(validated_data["password"]),
+            password=validated_data["password"],
             user_type=validated_data["user_type"]
         )
         return user
@@ -50,7 +50,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 class ChoiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Choice
-        fields = ["id", "choice_text", "votes"]
+        fields = ["choice_text", "votes"]
 
     def validate_choice_text(self, value):
         if len(value.strip()) == 0:
@@ -63,13 +63,54 @@ class QuestionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Question
-        fields = ["id", "question_text", "pub_date", "choices"]
+        fields = ["question_text", "pub_date", "choices"]
 
-    def get_choices(self, obj):
-        return ChoiceSerializer(obj.choices.all(), many=True).data
+    def create(self, validated_data):
+        choices_data = validated_data.pop('choices', [])
+
+        if not choices_data:
+            raise serializers.ValidationError({"choices": "A question must have at least one choice."})
+
+        question = Question.objects.create(**validated_data)
+
+        for choice_data in choices_data:
+            Choice.objects.create(question=question, **choice_data)
+
+        return question
 
 
 class VoteSerializer(serializers.ModelSerializer):
+    choice_id = serializers.IntegerField(write_only=True)
+
     class Meta:
         model = Vote
-        fields = '__all__'
+        fields = ['choice_id']
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        user = request.user
+        choice = Choice.objects.get(id=validated_data['choice_id'])
+        question = choice.question
+
+        if Vote.objects.filter(user=user, question=question).exists():
+            raise serializers.ValidationError({"error": "You have already voted on this question."})
+
+        vote = Vote.objects.create(user=user, question=question, choice=choice)
+
+        choice.votes += 1
+        choice.save()
+
+        return vote
+
+
+class UserVotedQuestionSerializer(serializers.ModelSerializer):
+    selected_choice = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Question
+        fields = ['id', 'question_text', 'selected_choice']
+
+    def get_selected_choice(self, obj):
+        user = self.context['request'].user
+        vote = Vote.objects.filter(user=user, question=obj).first()
+        return vote.choice.choice_text if vote else None
